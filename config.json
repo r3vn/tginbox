@@ -1,0 +1,27 @@
+{
+  "smtpservers" : [
+    {
+      "enabled"   : true,
+      "address"   : "127.0.0.1",
+      "hostname"  : "mailtotg.local",
+      "port"      : 2525,
+      "starttls"  : false,
+      "cert_path" : "",
+      "key_path"  : "",
+      "ca_path"   : ""
+    }
+  ],
+
+  "accounts": [
+    {
+      "address"          : "user@gmail.com",
+      "telegram_bot_key" : "BOT_API_KEY",
+      "telegram_chat_id" : "CHAT_ID"
+    },
+    {
+      "address"          : "another.user@pm.me",
+      "telegram_bot_key" : "BOT_API_KEY",
+      "telegram_chat_id" : "CHAT_ID"
+    }
+  ]
+}
