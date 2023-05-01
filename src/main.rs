@@ -3,8 +3,48 @@ use serde_json::json;
 use serde_derive::{Deserialize, Serialize};
 use mailin_embedded::{Server, SslConfig, Handler, Response};
 use mailin_embedded::response::OK;
-use mailparse::{ParsedMail, MailHeaderMap};
+use mailparse::MailHeaderMap;
 use clap::Parser;
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+struct Message {
+    from: String,
+    to: String,
+    subject: String,
+    body: String
+}
+
+impl Message {
+    pub fn new(mime: &String) -> Message {
+        // Get a message from a mime
+        // parse mail, return a ParsedMail
+        let mail = match mailparse::parse_mail(mime.as_ref()) {
+            Ok(p) => p,
+            Err(_e) => return Message {
+                from: "".to_string(),
+                to: "".to_string(),
+                subject: "".to_string(),
+                body: "".to_string()
+            } // error parsing email
+        };
+        
+        Message { 
+            from: mail.get_headers().get_first_value("From")
+                .unwrap_or_default()
+                .to_string(),
+            to: mail.get_headers().get_first_value("To")
+                .unwrap_or_default()
+                .to_string(),
+            subject: mail.get_headers().get_first_value("Subject")
+                .unwrap_or_default()
+                .to_string(),
+            body: nanohtml2text::html2text(
+                &mut mail.get_body()
+                    .unwrap_or_default()
+                    .to_string())
+        }
+    }
+}
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 struct Account {
@@ -42,13 +82,18 @@ struct Cli {
 struct MyHandler {
     mime: Vec<String>,
     accounts: Vec<Account>,
+    rt: tokio::runtime::Handle
 }
 
 impl MyHandler {
-    pub fn new(accounts: Vec<Account>) -> MyHandler {
+    pub fn new(
+        accounts: Vec<Account>, 
+        runtime: tokio::runtime::Handle
+    ) -> MyHandler {
         MyHandler { 
             mime: vec![],
-            accounts: accounts
+            accounts: accounts,
+            rt: runtime
         }
     }
 }
@@ -78,77 +123,32 @@ impl Handler for MyHandler {
     fn data_end(&mut self) -> Response {
         // retrive mail
         let mime = self.mime.join("");
+        let msg = Message::new(&mime);
+        let accounts = self.accounts.clone();
 
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let parsed = match mailparse::parse_mail(mime.as_ref()) {
-                    Ok(p) => p,
-                    Err(e) => return Err(e) // error parsing email
-                };
+        self.rt.spawn(async move {
+            let destination = find_account(&accounts, &msg.to)
+                .await
+                .unwrap();
+                
+            // send telegram message
+            send_to_telegram(
+                &msg,
+                &destination.telegram_chat_id,
+                &destination.telegram_bot_key
+            )
+                .await
+                .unwrap();
 
-                // check if destination address is defined
-                let message = match parsed.get_headers().get_first_value("To") {
-                    Some(acc) => {
-                        let mut dest_found = false;
-
-                        // destination is defined, check if destination account is on this server
-                        for tg_account in &self.accounts {
-                            if &tg_account.address.to_string() == &acc {
-                                // destination account exists
-                                // send telegram message
-                                send_to_telegram(
-                                    &parsed,
-                                    &tg_account.telegram_chat_id,
-                                    &tg_account.telegram_bot_key
-                                ).await.unwrap();
-
-                                dest_found = true;
-                                continue;
-                            }
-                        }
-
-                        if !dest_found {
-                            // destination address not found on this server, 
-                            // pick the first account as default
-                            let tg_account = &self.accounts[0];
-
-                            // send telegram message
-                            send_to_telegram(
-                                &parsed,
-                                &tg_account.telegram_chat_id,
-                                &tg_account.telegram_bot_key
-                            ).await.unwrap();
-                        }
-
-                        Ok(())
-                    },
-                    _ => {
-                        // mail is missing 'To' header, 
-                        // pick the first account as default
-                        let tg_account = &self.accounts[0];
-
-                        // send telegram message
-                        send_to_telegram(
-                            &parsed,
-                            &tg_account.telegram_chat_id,
-                            &tg_account.telegram_bot_key
-                        ).await.unwrap();
-
-                        Ok(()) // account not found on this server
-                    }
-                };
-                message
-            }).unwrap();
+            ()
+        });
 
         OK
     }
 }
 
 async fn send_to_telegram(
-    mail: &ParsedMail<'_>,
+    message: &Message,
     chat_id: &str,
     bot_key: &str
 ) -> Result<(), Box<dyn std::error::Error>>  {
@@ -160,12 +160,11 @@ async fn send_to_telegram(
     );
 
     // Telegram html message
-    let body = nanohtml2text::html2text(&mut mail.get_body().unwrap().to_string());
     let telegram_message = format!(
-        "from: {}\n<b>{}</b>\n{}", 
-        &mail.get_headers().get_first_value("From").unwrap().to_string(),
-        &mail.get_headers().get_first_value("Subject").unwrap().to_string(),
-        &body.to_string()
+        "\u{1F4E8} {}\n<b>{}</b>\n{}", 
+        &message.from,
+        &message.subject,
+        &message.body
     );
 
     // prepare json post data
@@ -186,6 +185,22 @@ async fn send_to_telegram(
     Ok(())
 }
 
+async fn find_account<'a>(
+        accounts: &'a Vec<Account>, 
+        address: &'a String
+) -> Option<&'a Account> {
+    // Try to find the account with a matching address
+    let account = accounts.iter().find(|a| &a.address == address);
+
+    // If we found an account, return it
+    if let Some(account) = account {
+        return Some(account);
+    }
+
+    // If no matching account was found, return the first account in the vector
+    accounts.first()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
@@ -204,7 +219,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for smtpserver in configuration.smtpservers {
         // set up smtp server
-        let handler = MyHandler::new(configuration.accounts.clone());
+        let rt = tokio::runtime::Handle::current();
+        let handler = MyHandler::new(configuration.accounts.clone(), rt.clone());
         let mut server = Server::new(handler);
 
         handles.push(tokio::spawn(async move {
