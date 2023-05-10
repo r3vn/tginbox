@@ -6,7 +6,7 @@ use mailin_embedded::response::OK;
 use mailparse::MailHeaderMap;
 use clap::Parser;
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct Message {
     from: String,
     to: String,
@@ -30,18 +30,14 @@ impl Message {
         
         Message { 
             from: mail.get_headers().get_first_value("From")
-                .unwrap_or_default()
-                .to_string(),
+                .unwrap_or_default(),
             to: mail.get_headers().get_first_value("To")
-                .unwrap_or_default()
-                .to_string(),
+                .unwrap_or_default(),
             subject: mail.get_headers().get_first_value("Subject")
-                .unwrap_or_default()
-                .to_string(),
+                .unwrap_or_default(),
             body: nanohtml2text::html2text(
-                &mut mail.get_body()
-                    .unwrap_or_default()
-                    .to_string())
+                &mail.get_body()
+                    .unwrap_or_default())
         }
     }
 }
@@ -92,7 +88,7 @@ impl MyHandler {
     ) -> MyHandler {
         MyHandler { 
             mime: vec![],
-            accounts: accounts,
+            accounts,
             rt: runtime
         }
     }
@@ -107,7 +103,7 @@ impl Handler for MyHandler {
     ) -> Response {
         // hack add from header
         let from = "From: ".to_owned() + _from + "\n";
-        self.mime.push(from.to_string());
+        self.mime.push(from);
         OK
     }
 
@@ -123,10 +119,13 @@ impl Handler for MyHandler {
     fn data_end(&mut self) -> Response {
         // retrive mail
         let mime = self.mime.join("");
-        let msg = Message::new(&mime);
         let accounts = self.accounts.clone();
 
         self.rt.spawn(async move {
+            // get a Message
+            let msg = Message::new(&mime);
+
+            // get destination account
             let destination = find_account(&accounts, &msg.to)
                 .await
                 .unwrap();
@@ -139,8 +138,6 @@ impl Handler for MyHandler {
             )
                 .await
                 .unwrap();
-
-            ()
         });
 
         OK
@@ -186,7 +183,7 @@ async fn send_to_telegram(
 }
 
 async fn find_account<'a>(
-        accounts: &'a Vec<Account>, 
+        accounts: &'a [Account], 
         address: &'a String
 ) -> Option<&'a Account> {
     // Try to find the account with a matching address
