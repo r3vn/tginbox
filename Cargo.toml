@@ -5,13 +5,13 @@ authors = ["Giuseppe Corti <giuseppe.corti@pm.me>"]
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.28.0", features = ["full"] }
-futures = "0.3.28"
+tokio = { version = "1.28", features = ["full"] }
+futures = "0.3"
 mailin-embedded = "^0"
-mailparse = "0.13.8"
-reqwest = { version = "0.11.16", features = ["json"] }
+mailparse = "0.13"
+reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", default-features = false }
 serde_json = "1.0"
 serde_derive = "1.0"
-clap = { version = "4.2.4", features = ["derive"] }
-nanohtml2text = "0.1.4"
+clap = { version = "4.2", features = ["derive"] }
+nanohtml2text = "0.1"
