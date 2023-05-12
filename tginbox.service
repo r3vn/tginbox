@@ -1,0 +1,13 @@
+[Unit]
+Description=tginbox service
+After=multi-user.target
+
+[Service]
+Type=simple
+User=tginbox
+Group=tginbox
+Restart=always
+ExecStart=/usr/bin/tginbox /etc/tginbox/config.json
+
+[Install]
+WantedBy=multi-user.target
