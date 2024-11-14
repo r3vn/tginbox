@@ -19,6 +19,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
    
     let mut handles = vec![];
 
+    #[cfg(feature = "unixdaemon")]
+    if cli.daemonize {
+        // Fork and detach from terminal
+        match nix::unistd::daemon(false, false) {
+            Ok(_) => println!("[+] running as a daemon."),
+            Err(e) => {
+                eprintln!("[-] failed to daemonize process: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     for smtpserver in configuration.smtpservers {
         // set up smtp server
         let rt = tokio::runtime::Handle::current();

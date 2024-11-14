@@ -72,6 +72,10 @@ pub struct Cli {
     /// Sets a custom config file
     #[arg(value_name = "FILE", required = true )]
     pub config: String,
+
+    #[cfg(feature = "unixdaemon")]
+    #[arg(short, long)]
+    pub daemonize: bool,
 }
 
 #[derive(Clone, Debug)]
