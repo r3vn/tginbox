@@ -5,6 +5,7 @@ use mailin_embedded::{Handler, Response};
 use mailin_embedded::response::OK;
 use mailparse::MailHeaderMap;
 use clap::Parser;
+use tokio::io;
 
 #[derive(Clone, Debug)]
 struct Message {
@@ -73,9 +74,14 @@ pub struct Cli {
     #[arg(value_name = "FILE", required = true )]
     pub config: String,
 
+    // Optional feature, fork process
     #[cfg(feature = "unixdaemon")]
     #[arg(short, long)]
     pub daemonize: bool,
+
+    // Set verbosity level
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -99,30 +105,46 @@ impl MyHandler {
 }
 
 impl Handler for MyHandler {
+    fn helo(&mut self, _ip: IpAddr, _domain: &str) -> Response {
+        log::info!("Received HELO from IP: {}, domain: {}", _ip, _domain);
+        OK
+    }    
+
     fn mail(
         &mut self, 
         _ip: IpAddr, 
         _domain: &str, 
         _from: &str
     ) -> Response {
+        // Log incoming mail details
+        log::info!("Received mail: IP={}, domain={}, from={}", _ip, _domain, _from);
+
         // hack add from header
         let from = "From: ".to_owned() + _from + "\n";
         self.mime.push(from);
         OK
     }
 
-    fn data(
-        &mut self, 
-        buf: &[u8]
-    ) -> std::io::Result<()> {
-        // push data into msg
-        self.mime.push(String::from_utf8(Vec::from(buf)).unwrap());
+    fn data(&mut self, buf: &[u8]) -> io::Result<()> {
+        // Log the raw data received
+        match String::from_utf8(Vec::from(buf)) {
+            Ok(data) => {
+                log::info!("Received data chunk: {}", data);
+                self.mime.push(data);
+            }
+            Err(err) => {
+                log::error!("Failed to decode data chunk: {}", err);
+                return Err(io::Error::new(io::ErrorKind::InvalidData, err));
+            }
+        }
         Ok(())
     }
 
     fn data_end(&mut self) -> Response {
         // retrive mail
         let mime = self.mime.join("");
+        log::info!("End of data. Full MIME: {}", mime);
+
         let accounts = self.accounts.clone();
 
         self.rt.spawn(async move {
@@ -187,8 +209,8 @@ async fn send_to_telegram(
 }
 
 async fn find_account<'a>(
-        accounts: &'a [Account], 
-        address: &'a String
+    accounts: &'a [Account], 
+    address: &'a String
 ) -> Option<&'a Account> {
     // Try to find the account with a matching address
     let account = accounts.iter().find(|a| &a.address == address);

@@ -1,38 +1,51 @@
 use clap::Parser;
 use mailin_embedded::{Server, SslConfig};
+use log::LevelFilter;
 
 use tginbox::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    // parse cli arguments
+    // Parse cli arguments
     let cli = Cli::parse();
 
-    // read configuration file
+    // Read configuration file
     let configuration = {
         let configuration = std::fs::read_to_string(&cli.config)?;
         serde_json::from_str::<ConfigFile>(&configuration).unwrap()
     };
 
-    println!("[*] tginbox v{}", env!("CARGO_PKG_VERSION"));
-   
     let mut handles = vec![];
 
+    // Init logger
+    env_logger::Builder::new()
+        .filter_level(match cli.verbose {
+            0 => LevelFilter::Off,
+            1 => LevelFilter::Error,
+            2 => LevelFilter::Warn,
+            3 => LevelFilter::Info,
+            4 => LevelFilter::Debug,
+            5.. => LevelFilter::Trace,
+        })
+        .init();
+
+    println!("[*] tginbox v{}", env!("CARGO_PKG_VERSION"));
+   
     #[cfg(feature = "unixdaemon")]
     if cli.daemonize {
         // Fork and detach from terminal
         match nix::unistd::daemon(false, false) {
-            Ok(_) => println!("[+] running as a daemon."),
+            Ok(_) => log::info!("[+] running as a daemon."),
             Err(e) => {
-                eprintln!("[-] failed to daemonize process: {}", e);
+                log::error!("[-] failed to daemonize process: {}", e);
                 std::process::exit(1);
             }
         }
     }
 
     for smtpserver in configuration.smtpservers {
-        // set up smtp server
+        // Set up smtp server
         let rt = tokio::runtime::Handle::current();
         let handler = MyHandler::new(configuration.accounts.clone(), rt.clone());
         let mut server = Server::new(handler);
@@ -54,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if smtpserver.starttls {"yes"} 
                 else {"no"}
             };
-            println!(
+            log::info!(
                 "[+] starting {} on {}:{} ssl: {}", 
                 &smtpserver.hostname, 
                 &smtpserver.address, 
@@ -70,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     smtpserver.port
                 )).unwrap();
   
-            // start server
+            // Start server
             server.serve().unwrap();
         }));
     }
