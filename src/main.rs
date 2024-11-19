@@ -2,21 +2,20 @@ use clap::Parser;
 use mailin_embedded::{Server, SslConfig};
 use log::LevelFilter;
 
-use tginbox::*;
+use tginbox::{Cli, ConfigFile, MyHandler};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    // Parse cli arguments
+    println!("[*] tginbox v{}", env!("CARGO_PKG_VERSION"));
+
+    // Parse CLI arguments
     let cli = Cli::parse();
 
     // Read configuration file
     let configuration = {
-        let configuration = std::fs::read_to_string(&cli.config)?;
-        serde_json::from_str::<ConfigFile>(&configuration).unwrap()
+        let config_content = std::fs::read_to_string(&cli.config).unwrap();
+        serde_json::from_str::<ConfigFile>(&config_content)
     };
-
-    let mut handles = vec![];
 
     // Init logger
     env_logger::Builder::new()
@@ -30,19 +29,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .init();
 
-    println!("[*] tginbox v{}", env!("CARGO_PKG_VERSION"));
-   
     #[cfg(feature = "unixdaemon")]
     if cli.daemonize {
         // Fork and detach from terminal
         match nix::unistd::daemon(false, false) {
-            Ok(_) => log::info!("[+] running as a daemon."),
+            Ok(_) => log::info!("[+] Running as a daemon."),
             Err(e) => {
-                log::error!("[-] failed to daemonize process: {}", e);
+                log::error!("[-] Failed to daemonize process: {}", e);
                 std::process::exit(1);
             }
         }
     }
+
+    async_main(configuration?)
+}
+
+#[tokio::main]
+async fn async_main(configuration: ConfigFile) -> Result<(), Box<dyn std::error::Error>> {
+    let mut handles = vec![];
 
     for smtpserver in configuration.smtpservers {
         // Set up smtp server
@@ -82,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     smtpserver.address, 
                     smtpserver.port
                 )).unwrap();
-  
+
             // Start server
             server.serve().unwrap();
         }));
