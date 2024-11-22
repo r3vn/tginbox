@@ -1,15 +1,13 @@
 [package]
 name = "tginbox"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["Giuseppe Corti <giuseppe.corti@pm.me>"]
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.41", features = ["full"] }
-futures = "0.3"
 mailin-embedded = { git = "https://github.com/r3vn/mailin.git", branch = "parser-space" } # fork with fixed parser for some clients
-mailparse = "0.15"
-reqwest = { version = "0.12", features = ["json"] }
+mail-parser = "0.9"
+ureq = { version = "2.10", features = ["json"]}
 serde = { version = "1.0", default-features = false }
 serde_json = "1.0"
 serde_derive = "1.0"

@@ -1,6 +1,7 @@
+use std::thread;
 use clap::Parser;
-use mailin_embedded::{Server, SslConfig};
 use log::LevelFilter;
+use mailin_embedded::{Server, SslConfig};
 
 use tginbox::{Cli, ConfigFile, MyHandler};
 
@@ -15,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let configuration = {
         let config_content = std::fs::read_to_string(&cli.config).unwrap();
         serde_json::from_str::<ConfigFile>(&config_content)
-    };
+    }.unwrap();
 
     // Init logger
     env_logger::Builder::new()
@@ -41,56 +42,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    async_main(configuration?)
-}
-
-#[tokio::main]
-async fn async_main(configuration: ConfigFile) -> Result<(), Box<dyn std::error::Error>> {
     let mut handles = vec![];
 
     for smtpserver in configuration.smtpservers {
-        // Set up smtp server
-        let rt = tokio::runtime::Handle::current();
-        let handler = MyHandler::new(configuration.accounts.clone(), rt.clone());
-        let mut server = Server::new(handler);
+        // Clone configuration accounts for each thread
+        let accounts = configuration.accounts.clone();
 
-        handles.push(tokio::spawn(async move {
-            let ssl_config = {
-                if smtpserver.starttls {
-                    SslConfig::Trusted {
-                        cert_path : smtpserver.cert_path,
-                        key_path : smtpserver.key_path,
-                        chain_path : smtpserver.ca_path
-                    }
-                } else {
-                    SslConfig::None
+        // Set up smtp server in a separate thread
+        let handle = thread::spawn(move || {
+            let handler = MyHandler::new(accounts);
+            let mut server = Server::new(handler);
+
+            let ssl_config = if smtpserver.starttls {
+                SslConfig::Trusted {
+                    cert_path: smtpserver.cert_path,
+                    key_path: smtpserver.key_path,
+                    chain_path: smtpserver.ca_path,
                 }
+            } else {
+                SslConfig::None
             };
 
-            let is_ssl_enabled = {
-                if smtpserver.starttls {"yes"} 
-                else {"no"}
-            };
+            let is_ssl_enabled = if smtpserver.starttls { "yes" } else { "no" };
             log::info!(
-                "[+] starting {} on {}:{} ssl: {}", 
-                &smtpserver.hostname, 
-                &smtpserver.address, 
+                "[+] Starting {} on {}:{} SSL: {}",
+                &smtpserver.hostname,
+                &smtpserver.address,
                 &smtpserver.port,
                 is_ssl_enabled
             );
 
-            server.with_name(smtpserver.hostname)
-                .with_ssl(ssl_config).unwrap()
-                .with_addr(format!(
-                    "{}:{}", 
-                    smtpserver.address, 
-                    smtpserver.port
-                )).unwrap();
+            server
+                .with_name(smtpserver.hostname)
+                .with_ssl(ssl_config)
+                .unwrap()
+                .with_addr(format!("{}:{}", smtpserver.address, smtpserver.port))
+                .unwrap();
 
             // Start server
-            server.serve().unwrap();
-        }));
+            if let Err(e) = server.serve() {
+                log::error!("[-] Error in server: {}", e);
+            }
+        });
+
+        handles.push(handle);
     }
-    futures::future::join_all(handles).await;
+
+    // Wait for all threads to finish
+    for handle in handles {
+        if let Err(e) = handle.join() {
+            log::error!("[-] Error in thread: {:?}", e);
+        }
+    }
+
     Ok(())
 }

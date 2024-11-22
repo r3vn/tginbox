@@ -1,11 +1,11 @@
+use std::{io, thread};
 use std::net::IpAddr;
 use serde_json::json;
 use serde_derive::{Deserialize, Serialize};
 use mailin_embedded::{Handler, Response};
 use mailin_embedded::response::OK;
-use mailparse::MailHeaderMap;
+use mail_parser::MessageParser;
 use clap::Parser;
-use tokio::io;
 
 #[derive(Clone, Debug)]
 struct Message {
@@ -19,26 +19,54 @@ impl Message {
     pub fn new(mime: &String) -> Message {
         // Get a message from a mime
         // parse mail, return a ParsedMail
-        let mail = match mailparse::parse_mail(mime.as_ref()) {
-            Ok(p) => p,
-            Err(_e) => return Message {
-                from: "".to_string(),
-                to: "".to_string(),
-                subject: "".to_string(),
-                body: "".to_string()
-            } // error parsing email
+        let p = MessageParser::default().parse(mime.as_str()).unwrap(); 
+            
+        let body = {
+            let mut full_text_body = String::new();
+            let mut index = 0;
+
+            // Iterate through all parts
+            while let Some(part) = p.body_html(index) {
+                full_text_body.push_str(&part);
+                full_text_body.push('\n'); // Separate parts if needed
+                index += 1;
+            }
+
+            if full_text_body.len() > 4086 {
+                full_text_body
+                    .char_indices()
+                    .take_while(|&(idx, _)| idx < 4086)
+                    .last()
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+            }
+
+            nanohtml2text::html2text(&nanohtml2text::html2text(&full_text_body)) // FIXME?? lolol
         };
-        
-        Message { 
-            from: mail.get_headers().get_first_value("From")
+
+        log::trace!("Message parsed successfully, body: {}", body);
+
+        Message {
+            from: p.from()
+                .unwrap()
+                .first()
+                .unwrap()
+                .address()
+                .map(|s| s.to_string())
                 .unwrap_or_default(),
-            to: mail.get_headers().get_first_value("To")
+
+            to: p.to()
+                .unwrap()
+                .first()
+                .unwrap()
+                .address()
+                .map(|s| s.to_string())
                 .unwrap_or_default(),
-            subject: mail.get_headers().get_first_value("Subject")
-                .unwrap_or_default(),
-            body: nanohtml2text::html2text(
-                &mail.get_body()
-                    .unwrap_or_default())
+
+            subject: p.subject()
+                .unwrap_or_default()
+                .to_string(),
+            body
         }
     }
 }
@@ -70,7 +98,7 @@ pub struct ConfigFile {
 
 #[derive(Parser)]
 pub struct Cli {
-    /// Sets a custom config file
+    // Sets a custom config file
     #[arg(value_name = "FILE", required = true )]
     pub config: String,
 
@@ -88,18 +116,15 @@ pub struct Cli {
 pub struct MyHandler {
     mime: Vec<String>,
     accounts: Vec<Account>,
-    rt: tokio::runtime::Handle
 }
 
 impl MyHandler {
     pub fn new(
         accounts: Vec<Account>, 
-        runtime: tokio::runtime::Handle
     ) -> MyHandler {
         MyHandler { 
             mime: vec![],
             accounts,
-            rt: runtime
         }
     }
 }
@@ -141,85 +166,73 @@ impl Handler for MyHandler {
     }
 
     fn data_end(&mut self) -> Response {
-        // retrive mail
+        // Retrieve mail
         let mime = self.mime.join("");
         log::info!("End of data. Full MIME: {}", mime);
 
+        // Clone accounts for thread safety
         let accounts = self.accounts.clone();
 
-        self.rt.spawn(async move {
-            // get a Message
+        // Spawn a thread for processing
+        thread::spawn(move || {
+            // Get a Message
             let msg = Message::new(&mime);
 
-            // get destination account
-            let destination = find_account(&accounts, &msg.to)
-                .await
-                .unwrap();
-                
-            // send telegram message
-            send_to_telegram(
+            // Get destination account
+            let destination = find_account(&accounts, &msg.to);
+
+            // Send telegram message
+            if let Err(e) = send_to_telegram(
                 &msg,
                 &destination.telegram_chat_id,
-                &destination.telegram_bot_key
-            )
-                .await
-                .unwrap();
+                &destination.telegram_bot_key,
+            ) {
+                log::error!("Failed to send Telegram message: {}", e);
+            }
         });
 
         OK
     }
 }
 
-async fn send_to_telegram(
+fn send_to_telegram(
     message: &Message,
     chat_id: &str,
-    bot_key: &str
-) -> Result<(), Box<dyn std::error::Error>>  {
-
-    // Telegram sendMessage api call url
+    bot_key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Telegram sendMessage API call URL
     let telegram_api_url = format!(
-        "https://api.telegram.org/bot{}/sendMessage", 
-        &bot_key.to_string()
+        "https://api.telegram.org/bot{}/sendMessage",
+        bot_key
     );
 
-    // Telegram html message
+    // Telegram HTML message
     let telegram_message = format!(
-        "\u{1F4E8} {}\n<b>{}</b>\n{}", 
+        "\u{1F4E8} {}\n<b>{}</b>\n{}",
         &message.from,
         &message.subject,
         &message.body
     );
 
-    // prepare json post data
+    // Prepare JSON post data
     let post_data = json!({
-        "chat_id"    : chat_id,
-        "text"       : telegram_message,
-        "parse_mode" : "html"
+        "chat_id": chat_id,
+        "text": telegram_message,
+        "parse_mode": "html",
     });
 
-    // do post request
-    let client = reqwest::Client::new();
-    client.post(telegram_api_url)
-        .header("Content-type", "application/json")
-        .json(&post_data)
-        .send()
-        .await?;
-
+    let _req = ureq::post(&telegram_api_url).send_json(post_data);
+    
     Ok(())
 }
 
-async fn find_account<'a>(
-    accounts: &'a [Account], 
-    address: &'a String
-) -> Option<&'a Account> {
+fn find_account<'a>(
+    accounts: &'a [Account],
+    address: &'a String,
+) -> &'a Account {
     // Try to find the account with a matching address
-    let account = accounts.iter().find(|a| &a.address == address);
-
-    // If we found an account, return it
-    if let Some(account) = account {
-        return Some(account);
-    }
-
-    // If no matching account was found, return the first account in the vector
-    accounts.first()
+    accounts
+        .iter()
+        .find(|a| &a.address == address)
+        .or_else(|| accounts.first()).unwrap()
 }
