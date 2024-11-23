@@ -23,7 +23,3 @@ To start tginbox with your configured accounts, run the following command:
 $ tginbox /path/to/config.json
 ```
 
-## To-do
-
-- [ ] better handle encoded mails
-- [ ] attachments support

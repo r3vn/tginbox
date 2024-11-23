@@ -1,26 +1,30 @@
-use std::{io, thread};
+use std::{io, thread, string::String, io::Write};
 use std::net::IpAddr;
 use serde_json::json;
 use serde_derive::{Deserialize, Serialize};
 use mailin_embedded::{Handler, Response};
 use mailin_embedded::response::OK;
-use mail_parser::MessageParser;
+use mail_parser::{MimeHeaders, MessageParser};
 use clap::Parser;
 
 #[derive(Clone, Debug)]
-struct Message {
+struct Notification {
     from: String,
     to: String,
     subject: String,
-    body: String
+    body: String,
+    attachments: Vec<(String, Vec<u8>)>
 }
 
-impl Message {
-    pub fn new(mime: &String) -> Message {
-        // Get a message from a mime
-        // parse mail, return a ParsedMail
-        let p = MessageParser::default().parse(mime.as_str()).unwrap(); 
-            
+impl Notification {
+    pub fn new(mime: &str) -> Notification {
+        // Parse MIME
+        let p = MessageParser::default().parse(mime).unwrap();
+
+        // Collect attachments
+        let attachments = collect_attachments(&p);
+        
+        // Fix body
         let body = {
             let mut full_text_body = String::new();
             let mut index = 0;
@@ -32,6 +36,12 @@ impl Message {
                 index += 1;
             }
 
+            // Remove HTML from body
+            full_text_body = nanohtml2text::html2text(
+                &nanohtml2text::html2text(&full_text_body) // FIXME?? lolol
+            ); 
+
+            // Cut body if greater than 4086 (4096 is max allowed)
             if full_text_body.len() > 4086 {
                 full_text_body
                     .char_indices()
@@ -41,12 +51,14 @@ impl Message {
                     .unwrap_or(0);
             }
 
-            nanohtml2text::html2text(&nanohtml2text::html2text(&full_text_body)) // FIXME?? lolol
+            full_text_body
         };
 
+        // Debug MIME decoding
         log::trace!("Message parsed successfully, body: {}", body);
 
-        Message {
+        // Return Messaage
+        Notification {
             from: p.from()
                 .unwrap()
                 .first()
@@ -66,7 +78,8 @@ impl Message {
             subject: p.subject()
                 .unwrap_or_default()
                 .to_string(),
-            body
+            body,
+            attachments
         }
     }
 }
@@ -131,6 +144,7 @@ impl MyHandler {
 
 impl Handler for MyHandler {
     fn helo(&mut self, _ip: IpAddr, _domain: &str) -> Response {
+        // Log HELO
         log::info!("Received HELO from IP: {}, domain: {}", _ip, _domain);
         OK
     }    
@@ -143,10 +157,6 @@ impl Handler for MyHandler {
     ) -> Response {
         // Log incoming mail details
         log::info!("Received mail: IP={}, domain={}, from={}", _ip, _domain, _from);
-
-        // hack add from header
-        let from = "From: ".to_owned() + _from + "\n";
-        self.mime.push(from);
         OK
     }
 
@@ -154,7 +164,7 @@ impl Handler for MyHandler {
         // Log the raw data received
         match String::from_utf8(Vec::from(buf)) {
             Ok(data) => {
-                log::info!("Received data chunk: {}", data);
+                log::debug!("Received data chunk: {}", data);
                 self.mime.push(data);
             }
             Err(err) => {
@@ -176,19 +186,17 @@ impl Handler for MyHandler {
         // Spawn a thread for processing
         thread::spawn(move || {
             // Get a Message
-            let msg = Message::new(&mime);
+            let msg = Notification::new(&mime);
 
             // Get destination account
             let destination = find_account(&accounts, &msg.to);
 
             // Send telegram message
-            if let Err(e) = send_to_telegram(
+            send_to_telegram(
                 &msg,
                 &destination.telegram_chat_id,
                 &destination.telegram_bot_key,
-            ) {
-                log::error!("Failed to send Telegram message: {}", e);
-            }
+            )
         });
 
         OK
@@ -196,13 +204,19 @@ impl Handler for MyHandler {
 }
 
 fn send_to_telegram(
-    message: &Message,
+    message: &Notification,
     chat_id: &str,
     bot_key: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     // Telegram sendMessage API call URL
-    let telegram_api_url = format!(
+    let telegram_message_url = format!(
         "https://api.telegram.org/bot{}/sendMessage",
+        bot_key
+    );
+
+    // Telegram sendMessage API call URL
+    let telegram_document_url = format!(
+        "https://api.telegram.org/bot{}/sendDocument",
         bot_key
     );
 
@@ -221,9 +235,40 @@ fn send_to_telegram(
         "parse_mode": "html",
     });
 
-    let _req = ureq::post(&telegram_api_url).send_json(post_data);
-    
-    Ok(())
+    // Send Message
+    match ureq::post(&telegram_message_url).send_json(post_data) {
+        Ok(response) => {
+            log::debug!("Message sent to telegram successfully");
+            log::trace!("Response: {:#?}", response);
+        },
+        Err(ureq::Error::Status(code, response)) => {
+            log::error!("Failed to send Telegram message, error code: {}", code);
+            log::trace!("Response: {:#?}", response);
+        },
+        Err(_) => log::error!("Failed to send Telegram message, transport error")
+    };
+
+    // Send Attachments
+    for (name, content) in &message.attachments {
+
+        // Get Multipart data
+        let (body, boundary) = build_multipart(name.to_string(), content.to_vec(), chat_id.to_string());
+
+        // Send the request
+        let response = ureq::post(&telegram_document_url)
+            .set("Content-Type", &format!("multipart/form-data; boundary={}", boundary))
+            .send_bytes(&body);
+
+        // Handle response
+        match response {
+            Ok(res) => {
+                log::debug!("Sent file {}: {}", name, res.status_text());
+            }
+            Err(err) => {
+                log::error!("Failed to send file {}: {}", name, err);
+            }
+        }
+    }
 }
 
 fn find_account<'a>(
@@ -235,4 +280,52 @@ fn find_account<'a>(
         .iter()
         .find(|a| &a.address == address)
         .or_else(|| accounts.first()).unwrap()
+}
+
+fn collect_attachments(message: &mail_parser::Message) -> Vec<(String, Vec<u8>)> {
+    // Recursively collect mail attachments into a vector
+
+    let mut attachments = Vec::new();
+
+    for attachment in message.attachments() {
+        if !attachment.is_message() {
+            let name = attachment.attachment_name().unwrap_or("Untitled").to_string();
+            let contents = attachment.contents().to_vec(); // Store contents in memory
+            attachments.push((name, contents));
+        } else {
+            attachments.extend(collect_attachments(attachment.message().unwrap()));
+        }
+    }
+    attachments
+}
+
+fn build_multipart(
+    name: String, 
+    content: Vec<u8>, 
+    chat_id: String
+) -> (Vec<u8>, String) {
+    // Build multipart for file upload
+    let boundary = "------------------------boundary";
+
+    // Construct the multipart body
+    let mut body = Vec::new();
+
+    // Add the `chat_id` field
+    write!(
+        body,
+        "--{}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{}\r\n",
+        boundary, chat_id
+    ).unwrap();
+
+    // Add the file (document)
+    write!(
+        body,
+        "--{}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{}\"\r\n\
+         Content-Type: application/octet-stream\r\n\r\n",
+        boundary, name
+    ).unwrap();
+    body.extend(content);
+    write!(body, "\r\n--{}--\r\n", boundary).unwrap();
+
+    (body, boundary.to_string())
 }
