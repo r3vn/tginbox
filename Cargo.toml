@@ -5,9 +5,9 @@ authors = ["Giuseppe Corti <giuseppe.corti@pm.me>"]
 edition = "2021"
 
 [dependencies]
-mailin-embedded = { path = "../mailin/mailin-embedded/"} #, branch = "parser-space" } # fork with fixed parser for some clients
+mailin-embedded = { git = "https://github.com/r3vn/mailin.git", branch = "parser-space" } # fork with fixed parser for some clients
 mail-parser = "0.9"
-ureq = { version = "2.12", features = ["json"]}
+ureq = { version = "3.0", features = ["json"]}
 serde = { version = "1.0", default-features = false }
 serde_json = "1.0"
 serde_derive = "1.0"

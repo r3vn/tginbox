@@ -241,9 +241,9 @@ fn send_to_telegram(
             log::debug!("Message sent to telegram successfully");
             log::trace!("Response: {:#?}", response);
         },
-        Err(ureq::Error::Status(code, response)) => {
+        Err(ureq::Error::StatusCode(code)) => {
             log::error!("Failed to send Telegram message, error code: {}", code);
-            log::trace!("Response: {:#?}", response);
+            //log::trace!("Response: {:#?}", response);
         },
         Err(_) => log::error!("Failed to send Telegram message, transport error")
     };
@@ -256,13 +256,13 @@ fn send_to_telegram(
 
         // Send the request
         let response = ureq::post(&telegram_document_url)
-            .set("Content-Type", &format!("multipart/form-data; boundary={}", boundary))
-            .send_bytes(&body);
+            .header("Content-Type", &format!("multipart/form-data; boundary={}", boundary))
+            .send(&body);
 
         // Handle response
         match response {
             Ok(res) => {
-                log::debug!("Sent file {}: {}", name, res.status_text());
+                log::debug!("Sent file {}: {}", name, res.status());
             }
             Err(err) => {
                 log::error!("Failed to send file {}: {}", name, err);
