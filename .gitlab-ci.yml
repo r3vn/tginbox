@@ -1,0 +1,24 @@
+stages:
+  - build
+  - deploy
+
+build:amd64:
+  stage: build
+  image: rust:latest
+  script:
+    - cargo build --release
+  artifacts:
+    paths:
+      - target/release/tginbox
+
+pages:
+  stage: deploy
+  image: alpine:latest
+  dependencies:
+    - build:amd64
+  script:
+    - mkdir -p public/$CI_COMMIT_BRANCH
+    - mv target/release/* public/$CI_COMMIT_BRANCH/
+  artifacts:
+    paths:
+      - public
